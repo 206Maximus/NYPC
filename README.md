@@ -1,2 +1,147 @@
 # NYPC
-Yacht Auction
+class Game:
+
+    def __init__(self, board, first):
+        self.board = board
+        self.first = first
+        self.passed = False
+        
+        self.rows = len(board)
+        self.cols = len(board[0])
+        
+        # 점령 상태 배열 초기화
+        self.my_area = [[False for _ in range(self.cols)] for _ in range(self.rows)]
+        self.opp_area = [[False for _ in range(self.cols)] for _ in range(self.rows)]
+        
+        # 누적 합 배열 초기화
+        self.prefix_sum = [[0 for _ in range(self.cols + 1)] for _ in range(self.rows + 1)]
+        self._rebuild_prefix_sum()
+
+    def _rebuild_prefix_sum(self):
+        """보드 변경 후 prefix_sum을 최신 상태로 갱신"""
+        for r in range(self.rows):
+            for c in range(self.cols):
+                self.prefix_sum[r+1][c+1] = (
+                    self.prefix_sum[r][c+1] +
+                    self.prefix_sum[r+1][c] -
+                    self.prefix_sum[r][c] +
+                    self.board[r][c]
+                )
+
+    def isValid(self, r1, c1, r2, c2):
+        # O(1)로 합 계산
+        sums = self.prefix_sum[r2 + 1][c2 + 1] \
+             - self.prefix_sum[r1][c2 + 1] \
+             - self.prefix_sum[r2 + 1][c1] \
+             + self.prefix_sum[r1][c1]
+
+        if sums != 10:
+            return False
+
+        r1fit = c1fit = r2fit = c2fit = False
+        for r in range(r1, r2 + 1):
+            for c in range(c1, c2 + 1):
+                if self.board[r][c] != 0:
+                    if r == r1: r1fit = True
+                    if r == r2: r2fit = True
+                    if c == c1: c1fit = True
+                    if c == c2: c2fit = True
+        
+        return r1fit and r2fit and c1fit and c2fit
+
+    def calculateMove(self, _myTime, _oppTime):
+        best_move = (-1, -1, -1, -1)
+        max_score = -1
+        rows, cols = self.rows, self.cols
+
+        for r1 in range(rows):
+            for c1 in range(cols):
+                for r2 in range(r1, rows):
+                    for c2 in range(c1, cols):
+                        if self.isValid(r1, c1, r2, c2):
+                            current_score = self.calculate_hybrid_score(r1, c1, r2, c2)
+                            if current_score > max_score:
+                                max_score = current_score
+                                best_move = (r1, c1, r2, c2)
+        return best_move
+
+    def calculate_hybrid_score(self, r1, c1, r2, c2):
+        stolen_cells = 0
+        claimed_cells = 0
+        
+        for r in range(r1, r2 + 1):
+            for c in range(c1, c2 + 1):
+                if self.opp_area[r][c]:
+                    stolen_cells += 1
+                elif not self.my_area[r][c]:
+                    claimed_cells += 1
+        
+        return (stolen_cells * 10) + claimed_cells
+
+    def updateOpponentAction(self, action, _time):
+        self.updateMove(*action, False)
+
+    def updateMove(self, r1, c1, r2, c2, isMyMove):
+        if r1 == c1 == r2 == c2 == -1:
+            self.passed = True
+            return
+
+        for r in range(r1, r2 + 1):
+            for c in range(c1, c2 + 1):
+                self.board[r][c] = 0
+                if isMyMove:
+                    self.my_area[r][c] = True
+                    self.opp_area[r][c] = False
+                else:
+                    self.opp_area[r][c] = True
+                    self.my_area[r][c] = False
+
+        self._rebuild_prefix_sum()
+        self.passed = False
+
+
+def main():
+    global first, game
+    first = False
+    game = None
+
+    while True:
+        line = input().split()
+        if not line:
+            continue
+
+        command, *param = line
+
+        if command == "READY":
+            turn = param[0]
+            first = (turn == "FIRST")
+            print("OK", flush=True)
+            continue
+
+        if command == "INIT":
+            # param이 "123" 같은 형태일 경우 각 문자를 int 변환
+            board = [list(map(int, row)) for row in param]
+            game = Game(board, first)
+            continue
+
+        if command == "TIME":
+            myTime, oppTime = map(int, param)
+            ret = game.calculateMove(myTime, oppTime)
+            game.updateMove(*ret, True)
+            print(*ret, flush=True)
+            continue
+
+        if command == "OPP":
+            r1, c1, r2, c2, time = map(int, param)
+            game.updateOpponentAction((r1, c1, r2, c2), time)
+            continue
+
+        if command == "FINISH":
+            break
+
+        raise ValueError(f"Invalid command {command}")
+
+
+if __name__ == "__main__":
+    main()
+
