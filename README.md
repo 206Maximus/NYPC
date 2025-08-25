@@ -67,42 +67,41 @@ class Game:
         self.round += 1
         self.seen_dice_counts.update(dice_a)
         self.seen_dice_counts.update(dice_b)
-        
-        if self.round == 1:
-            my_potential_a, _ = self._evaluate_potential(dice_a, self.my_state)
-            my_potential_b, _ = self._evaluate_potential(dice_b, self.my_state)
-            group_to_bid = 'A' if my_potential_a >= my_potential_b else 'B'
-            return Bid(group_to_bid, 1)
 
+        # 어느 그룹에 더 높은 잠재 점수가 있는지 평가
+        my_potential_a, my_rule_a = self._evaluate_potential(dice_a, self.my_state)
+        my_potential_b, my_rule_b = self._evaluate_potential(dice_b, self.my_state)
+        group_to_bid = 'A' if my_potential_a >= my_potential_b else 'B'
+
+        # ==================== [수정된 로직 시작] ====================
+        
+        # 초반 라운드 전략 (1-4 라운드): 500으로 고정 입찰
+        if self.round <= 4:
+            return Bid(group_to_bid, 500)
+
+        # 상대방 평균 입찰가 계산 (중/후반 라운드에서 사용)
         non_zero_bids = [b for b in self.opp_bid_history if b > 0]
         avg_opp_bid = (sum(non_zero_bids) / len(non_zero_bids)) if non_zero_bids else 100
 
-        base_bid = max(1, int(avg_opp_bid))
+        # 중반 라운드 전략 (5-8 라운드): 상대 평균 입찰가 기반으로 공격적 입찰
+        if self.round < 9:
+            # (상대 평균 입찰가 * 1.6) + 1500
+            bid_amount = max(1, int(avg_opp_bid * 1.6 + 1500))
+            return Bid(group_to_bid, bid_amount)
         
-        my_potential_a, my_rule_a = self._evaluate_potential(dice_a, self.my_state)
-        my_potential_b, my_rule_b = self._evaluate_potential(dice_b, self.my_state)
-        
-        group_to_bid = 'A' if my_potential_a >= my_potential_b else 'B'
-        
-        # === 중/후반 통합 공격적 입찰 로직 (1.9배) ===
-        critical_bid = max(1, int(avg_opp_bid * 1.9))
-        
-        PRIORITY_RULES = {
-            DiceRule.YACHT, DiceRule.LARGE_STRAIGHT, DiceRule.SMALL_STRAIGHT, 
-            DiceRule.SIX, DiceRule.FIVE, DiceRule.FULL_HOUSE, DiceRule.FOUR_OF_A_KIND
-        }
-        a_is_prio = my_rule_a in PRIORITY_RULES and self.my_state.rule_score[my_rule_a.value] is None
-        b_is_prio = my_rule_b in PRIORITY_RULES and self.my_state.rule_score[my_rule_b.value] is None
-
-        if a_is_prio or b_is_prio:
-            if a_is_prio and not b_is_prio:
-                return Bid('A', critical_bid)
-            if not a_is_prio and b_is_prio:
-                return Bid('B', critical_bid)
-            
-            return Bid(group_to_bid, critical_bid)
+        # 후반 라운드 전략 (9라운드 이상): 기존의 신중한 로직 유지
         else:
-            return Bid(group_to_bid, base_bid)
+            base_bid = max(1, int(avg_opp_bid))
+            MUST_WIN_RULES = {DiceRule.YACHT, DiceRule.LARGE_STRAIGHT, DiceRule.FULL_HOUSE, DiceRule.FOUR_OF_A_KIND, DiceRule.SMALL_STRAIGHT}
+            a_is_must_win = my_rule_a in MUST_WIN_RULES and self.my_state.rule_score[my_rule_a.value] is None
+            b_is_must_win = my_rule_b in MUST_WIN_RULES and self.my_state.rule_score[my_rule_b.value] is None
+
+            if a_is_must_win or b_is_must_win:
+                cautious_bid = max(1, int(avg_opp_bid * 0.1))
+                return Bid(group_to_bid, cautious_bid)
+            else:
+                return Bid(group_to_bid, base_bid)
+        # ==================== [수정된 로직 끝] ======================
 
     def calculate_put(self) -> DicePut:
         my_hand = self.my_state.dice
@@ -114,7 +113,7 @@ class Game:
             return DicePut(DiceRule.CHOICE, [])
 
         dice_combos = list(itertools.combinations(my_hand, num_dice_to_choose))
-        
+
         priority_order = [
             DiceRule.SIX,
             DiceRule.YACHT,
@@ -155,18 +154,16 @@ class Game:
                 for combo in dice_combos:
                     dice_list = list(combo)
                     
+                    # === '6 저축' 전략 강화 ===
                     if six_rule_is_available:
-                        rules_to_save_six_from = {
-                            DiceRule.ONE, DiceRule.TWO, DiceRule.THREE, DiceRule.FOUR, DiceRule.FIVE,
-                            DiceRule.FULL_HOUSE, DiceRule.LARGE_STRAIGHT
-                        }
-                        if rule in rules_to_save_six_from and 6 in dice_list:
+                        # 기존: 스트레이트, 풀하우스에 6 사용 금지
+                        if (rule == DiceRule.LARGE_STRAIGHT or rule == DiceRule.FULL_HOUSE) and 6 in dice_list:
                             continue
                         
-                        if rule == DiceRule.CHOICE and dice_list.count(6) > 1:
+                        # 새로운 규칙: ONE ~ FIVE 족보에 6 사용 금지
+                        if rule in {DiceRule.ONE, DiceRule.TWO, DiceRule.THREE, DiceRule.FOUR, DiceRule.FIVE} and 6 in dice_list:
                             continue
-                        if rule == DiceRule.FOUR_OF_A_KIND and dice_list.count(6) > 1:
-                            continue
+                    # ==========================
 
                     score = GameState.calculate_score(DicePut(rule, dice_list))
                     if score > best_score_for_rule:
@@ -176,22 +173,18 @@ class Game:
                 if best_score_for_rule >= thresholds.get(rule, 1):
                     return DicePut(rule, best_dice_for_rule)
 
+        # Fallback 로직
         best_fallback_put = None
         best_fallback_score = -1
         for rule in available_rules:
             for combo in dice_combos:
                 dice_list = list(combo)
 
+                # Fallback에서도 '6 저축' 전략 강화
                 if six_rule_is_available:
-                    rules_to_save_six_from = {
-                        DiceRule.ONE, DiceRule.TWO, DiceRule.THREE, DiceRule.FOUR, DiceRule.FIVE,
-                        DiceRule.FULL_HOUSE, DiceRule.LARGE_STRAIGHT
-                    }
-                    if rule in rules_to_save_six_from and 6 in dice_list:
+                    if (rule == DiceRule.LARGE_STRAIGHT or rule == DiceRule.FULL_HOUSE) and 6 in dice_list:
                         continue
-                    if rule == DiceRule.CHOICE and dice_list.count(6) > 1:
-                        continue
-                    if rule == DiceRule.FOUR_OF_A_KIND and dice_list.count(6) > 1:
+                    if rule in {DiceRule.ONE, DiceRule.TWO, DiceRule.THREE, DiceRule.FOUR, DiceRule.FIVE} and 6 in dice_list:
                         continue
                 
                 score = GameState.calculate_score(DicePut(rule, dice_list))
