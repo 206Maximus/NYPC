@@ -84,8 +84,8 @@ class Game:
         
         group_to_bid = 'A' if my_potential_a >= my_potential_b else 'B'
         
-        # === 중/후반 통합 공격적 입찰 로직 (1.8배) ===
-        critical_bid = max(1, int(avg_opp_bid * 1.8))
+        # === 중/후반 통합 공격적 입찰 로직 (1.9배) ===
+        critical_bid = max(1, int(avg_opp_bid * 1.9))
         
         PRIORITY_RULES = {
             DiceRule.YACHT, DiceRule.LARGE_STRAIGHT, DiceRule.SMALL_STRAIGHT, 
@@ -155,23 +155,18 @@ class Game:
                 for combo in dice_combos:
                     dice_list = list(combo)
                     
-                    # === '6 저축' 전략 최종 강화 ===
                     if six_rule_is_available:
                         rules_to_save_six_from = {
-                            # 기본 족보
                             DiceRule.ONE, DiceRule.TWO, DiceRule.THREE, DiceRule.FOUR, DiceRule.FIVE,
-                            # 조합 족보
                             DiceRule.FULL_HOUSE, DiceRule.LARGE_STRAIGHT
                         }
                         if rule in rules_to_save_six_from and 6 in dice_list:
                             continue
                         
-                        # CHOICE와 FOUR_OF_A_KIND는 '6'을 1개까지만 허용
                         if rule == DiceRule.CHOICE and dice_list.count(6) > 1:
                             continue
                         if rule == DiceRule.FOUR_OF_A_KIND and dice_list.count(6) > 1:
                             continue
-                    # ==========================
 
                     score = GameState.calculate_score(DicePut(rule, dice_list))
                     if score > best_score_for_rule:
@@ -181,14 +176,12 @@ class Game:
                 if best_score_for_rule >= thresholds.get(rule, 1):
                     return DicePut(rule, best_dice_for_rule)
 
-        # Fallback 로직
         best_fallback_put = None
         best_fallback_score = -1
         for rule in available_rules:
             for combo in dice_combos:
                 dice_list = list(combo)
 
-                # Fallback에서도 '6 저축' 전략 최종 강화
                 if six_rule_is_available:
                     rules_to_save_six_from = {
                         DiceRule.ONE, DiceRule.TWO, DiceRule.THREE, DiceRule.FOUR, DiceRule.FIVE,
