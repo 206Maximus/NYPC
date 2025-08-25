@@ -93,10 +93,10 @@ class Game:
 
         # 2. 상대방 평균 입찰액 계산
         if not self.opp_bid_history:
-            opp_avg_bid = 1  # 기록이 없으면 보수적인 초기값 설정
+            opp_avg_bid = 0  # 기록이 없으면 보수적인 초기값 설정
         else:
-            opp_avg_bid = (sum(self.opp_bid_history) / len(self.opp_bid_history) ) + 1
-            
+            opp_avg_bid = sum(self.opp_bid_history) / len(self.opp_bid_history)
+
         # 3. 입찰액 계산 (상대 평균 기반)
         # 기본 입찰액: 상대의 평균 입찰액
         amount = opp_avg_bid
@@ -114,7 +114,7 @@ class Game:
         # 4. 최대 입찰액 제한 (리스크 관리)
         my_total_score = self.my_state.get_total_score()
         # 총점이 0 이하일 경우를 대비해 최소한의 입찰액 한도는 보장
-        max_bid_from_score = max(1, my_total_score * 0.10)
+        max_bid_from_score = max(0, my_total_score * 0.10)
         
         # 최종 입찰액 결정
         # 음수 베팅은 불가능
