@@ -42,19 +42,16 @@ class Game:
         self.my_state = GameState()  # 내 팀의 현재 상태
         self.opp_state = GameState()  # 상대 팀의 현재 상태
         self.round = 0
-        self.opp_bid_history = [] # 상대방의 입찰 기록
+        self.opp_bid_history = []  # 상대방의 입찰 기록
+        self.seen_dice_counts = Counter()  # 게임 전체에 등장한 주사위 숫자 카운트
 
     # ================================ [필수 구현] ================================
-    def _evaluate_potential(self, dice: List[int]) -> Tuple[int, Optional[DiceRule]]:
-        """
-        주어진 5개의 주사위로 얻을 수 있는 최대 잠재 점수와 그 때의 규칙을 계산합니다.
-        아직 사용하지 않은 규칙만을 대상으로 합니다.
-        """
+    def _evaluate_potential(self, dice: List[int], state: 'GameState') -> Tuple[int, Optional[DiceRule]]:
         best_score = -1
         best_rule = None
         available_rules = [
             DiceRule(i)
-            for i, score in enumerate(self.my_state.rule_score)
+            for i, score in enumerate(state.rule_score)
             if score is None
         ]
 
@@ -64,137 +61,152 @@ class Game:
                 best_score = score
                 best_rule = rule
 
-        return best_score, best_rule
+        return (best_score, best_rule) if best_score > -1 else (0, None)
 
     def calculate_bid(self, dice_a: List[int], dice_b: List[int]) -> Bid:
-        """
-        상대방의 평균 입찰액을 기준으로, 현재 게임 상황과 주사위 가치를
-        고려하여 입찰 전략을 결정합니다. 총점의 20%를 넘지 않도록 제한합니다.
-        """
         self.round += 1
-
-        # 1. 주사위 가치 평가
-        potential_a, _ = self._evaluate_potential(dice_a)
-        potential_b, _ = self._evaluate_potential(dice_b)
-
-        if potential_a > potential_b:
-            group = "A"
-            chosen_potential = potential_a
-            other_potential = potential_b
-        else:
-            if potential_a == potential_b and sum(dice_a) > sum(dice_b):
-                 group = "A"
-                 chosen_potential = potential_a
-                 other_potential = potential_b
-            else:
-                group = "B"
-                chosen_potential = potential_b
-                other_potential = potential_a
-
-        # 2. 상대방 평균 입찰액 계산
-        if not self.opp_bid_history:
-            opp_avg_bid = 0  # 기록이 없으면 보수적인 초기값 설정
-        else:
-            opp_avg_bid = sum(self.opp_bid_history) / len(self.opp_bid_history)
-
-        # 3. 입찰액 계산 (상대 평균 기반)
-        # 기본 입찰액: 상대의 평균 입찰액
-        amount = opp_avg_bid
-
-        # 조정 1: 내가 원하는 묶음의 상대적 가치 반영
-        amount += (chosen_potential - other_potential) / 3.0
-
-        # 조정 2: 현재 점수 상황 반영 (승/패)
-        score_diff = self.my_state.get_total_score() - self.opp_state.get_total_score()
-        if score_diff < 0: # 지고 있을 때
-            amount += abs(score_diff) / 5.0
-        else: # 이기고 있을 때
-            amount -= score_diff / 6.0
-
-        # 4. 최대 입찰액 제한 (리스크 관리)
-        my_total_score = self.my_state.get_total_score()
-        # 총점이 0 이하일 경우를 대비해 최소한의 입찰액 한도는 보장
-        max_bid_from_score = max(0, my_total_score * 0.10)
+        self.seen_dice_counts.update(dice_a)
+        self.seen_dice_counts.update(dice_b)
         
-        # 최종 입찰액 결정
-        # 음수 베팅은 불가능
-        final_amount = max(0, int(amount))
-        # 내 총점의 20%와 게임 최대 한도(100000) 중 작은 값으로 제한
-        final_amount = min(final_amount, int(max_bid_from_score), 100000)
+        if self.round == 1:
+            my_potential_a, _ = self._evaluate_potential(dice_a, self.my_state)
+            my_potential_b, _ = self._evaluate_potential(dice_b, self.my_state)
+            group_to_bid = 'A' if my_potential_a >= my_potential_b else 'B'
+            return Bid(group_to_bid, 1)
 
-        return Bid(group, final_amount)
+        non_zero_bids = [b for b in self.opp_bid_history if b > 0]
+        avg_opp_bid = (sum(non_zero_bids) / len(non_zero_bids)) if non_zero_bids else 100
 
+        base_bid = max(1, int(avg_opp_bid))
+        
+        my_potential_a, my_rule_a = self._evaluate_potential(dice_a, self.my_state)
+        my_potential_b, my_rule_b = self._evaluate_potential(dice_b, self.my_state)
+
+        # 후반 라운드 전략 (9라운드 이상)
+        if self.round >= 9:
+            MUST_WIN_RULES = {DiceRule.YACHT, DiceRule.LARGE_STRAIGHT, DiceRule.FULL_HOUSE, DiceRule.FOUR_OF_A_KIND, DiceRule.SMALL_STRAIGHT}
+            a_is_must_win = my_rule_a in MUST_WIN_RULES and self.my_state.rule_score[my_rule_a.value] is None
+            b_is_must_win = my_rule_b in MUST_WIN_RULES and self.my_state.rule_score[my_rule_b.value] is None
+
+            if a_is_must_win or b_is_must_win:
+                cautious_bid = max(1, int(avg_opp_bid * 0.1))
+                group_to_bid = 'A' if my_potential_a >= my_potential_b else 'B'
+                return Bid(group_to_bid, cautious_bid)
+            else:
+                group_to_bid = 'A' if my_potential_a >= my_potential_b else 'B'
+                return Bid(group_to_bid, base_bid)
+        
+        # 초중반 라운드 전략 (2-8 라운드)
+        else:
+            critical_bid = max(1, int(avg_opp_bid * 1.2))
+            PRIORITY_RULES = {DiceRule.YACHT, DiceRule.LARGE_STRAIGHT, DiceRule.SMALL_STRAIGHT}
+            my_a_is_prio = my_rule_a in PRIORITY_RULES and self.my_state.rule_score[my_rule_a.value] is None
+            my_b_is_prio = my_rule_b in PRIORITY_RULES and self.my_state.rule_score[my_rule_b.value] is None
+
+            if my_a_is_prio or my_b_is_prio:
+                if my_a_is_prio and not my_b_is_prio: return Bid('A', critical_bid)
+                if not my_a_is_prio and my_b_is_prio: return Bid('B', critical_bid)
+                group = 'A' if my_potential_a >= my_potential_b else 'B'
+                return Bid(group, critical_bid)
+            else:
+                group = 'A' if my_potential_a >= my_potential_b else 'B'
+                return Bid(group, base_bid)
 
     def calculate_put(self) -> DicePut:
-        """
-        현재 보유한 주사위와 사용 가능한 규칙을 모두 조합하여
-        최고의 점수를 낼 수 있는 조합을 찾아 반환합니다.
-        """
-        best_put = None
-        best_score = -1
+        my_hand = self.my_state.dice
+        available_rules = self.my_state.get_available_rules()
+        num_dice_to_choose = min(5, len(my_hand))
 
-        available_rules = [
-            DiceRule(i)
-            for i, score in enumerate(self.my_state.rule_score)
-            if score is None
+        if num_dice_to_choose <= 0:
+            if available_rules: return DicePut(available_rules[0], [])
+            return DicePut(DiceRule.CHOICE, [])
+
+        dice_combos = list(itertools.combinations(my_hand, num_dice_to_choose))
+        
+        priority_order = [
+            DiceRule.SIX,
+            DiceRule.YACHT,
+            DiceRule.LARGE_STRAIGHT,
+            DiceRule.FULL_HOUSE,
+            DiceRule.FOUR_OF_A_KIND,
+            DiceRule.SMALL_STRAIGHT,
+            DiceRule.FIVE,
+            DiceRule.FOUR,
+            DiceRule.THREE,
+            DiceRule.TWO,
+            DiceRule.ONE,
+            DiceRule.CHOICE,
         ]
 
-        # 보유한 주사위가 5개보다 많으면 5개를 선택하는 모든 조합을 고려
-        num_dice_to_choose = 5
-        if len(self.my_state.dice) < num_dice_to_choose:
-            num_dice_to_choose = len(self.my_state.dice)
-            
-        # 중복된 조합을 피하기 위해 set 사용
-        if num_dice_to_choose > 0:
-            dice_combos = set(itertools.combinations(self.my_state.dice, num_dice_to_choose))
-        else:
-            dice_combos = []
+        thresholds = {
+            DiceRule.YACHT: 49000,
+            DiceRule.LARGE_STRAIGHT: 29000,
+            DiceRule.SMALL_STRAIGHT: 14000,
+            DiceRule.FULL_HOUSE: 15000,
+            DiceRule.FOUR_OF_A_KIND: 15000,
+            DiceRule.SIX: 6000 * 4,
+            DiceRule.FIVE: 5000 * 3,
+            DiceRule.FOUR: 4000 * 3,
+            DiceRule.THREE: 3000 * 3,
+            DiceRule.TWO: 2000 * 3,
+            DiceRule.ONE: 1000 * 3,
+            DiceRule.CHOICE: 0,
+        }
+        
+        six_rule_is_available = self.my_state.rule_score[DiceRule.SIX.value] is None
 
-        if not dice_combos and num_dice_to_choose > 0: # 5개 미만일 경우
-            dice_combos.add(tuple(self.my_state.dice))
-
-        for combo in dice_combos:
-            dice_list = list(combo)
-            for rule in available_rules:
-                current_score = GameState.calculate_score(DicePut(rule, dice_list))
+        for rule in priority_order:
+            if rule in available_rules:
+                best_score_for_rule = -1
+                best_dice_for_rule = []
                 
-                if current_score > best_score:
-                    best_score = current_score
-                    best_put = DicePut(rule, dice_list)
+                for combo in dice_combos:
+                    dice_list = list(combo)
+                    
+                    # === '6 저축' 전략 적용 ===
+                    # SIX 규칙이 아직 비어있다면, 특정 조합에 6을 사용하지 못하게 막는다.
+                    if six_rule_is_available:
+                        if (rule == DiceRule.LARGE_STRAIGHT or rule == DiceRule.FULL_HOUSE) and 6 in dice_list:
+                            continue  # 이 조합은 건너뛰기
 
-        # 만약 어떤 규칙으로도 점수를 낼 수 없다면(best_score <= 0),
-        # 가장 점수 기대값이 낮은 규칙부터 사용
-        if best_score <= 0:
-            low_priority_rules = [DiceRule.ONE, DiceRule.TWO, DiceRule.THREE, DiceRule.CHOICE]
-            dice_to_put = self.my_state.dice[:num_dice_to_choose] if num_dice_to_choose > 0 else []
+                    score = GameState.calculate_score(DicePut(rule, dice_list))
+                    if score > best_score_for_rule:
+                        best_score_for_rule = score
+                        best_dice_for_rule = dice_list
+                
+                if best_score_for_rule >= thresholds.get(rule, 1):
+                    return DicePut(rule, best_dice_for_rule)
 
-            for rule in low_priority_rules:
-                if self.my_state.rule_score[rule.value] is None:
-                    best_put = DicePut(rule, dice_to_put)
-                    return best_put
-            
-            if best_put is None and available_rules:
-                 first_available_rule = available_rules[0]
-                 best_put = DicePut(first_available_rule, dice_to_put)
+        best_fallback_put = None
+        best_fallback_score = -1
+        for rule in available_rules:
+            for combo in dice_combos:
+                dice_list = list(combo)
+                # '6 저축' 전략을 여기서도 한 번 더 확인
+                if six_rule_is_available:
+                    if (rule == DiceRule.LARGE_STRAIGHT or rule == DiceRule.FULL_HOUSE) and 6 in dice_list:
+                        continue
+                
+                score = GameState.calculate_score(DicePut(rule, dice_list))
+                if score > best_fallback_score:
+                    best_fallback_score = score
+                    best_fallback_put = DicePut(rule, dice_list)
 
+        if best_fallback_put:
+            return best_fallback_put
 
-        return best_put
+        low_value_rules = [DiceRule.ONE, DiceRule.TWO, DiceRule.CHOICE]
+        for rule in low_value_rules:
+            if rule in available_rules:
+                return DicePut(rule, list(dice_combos[0]))
+        
+        return DicePut(available_rules[0], list(dice_combos[0]))
 
     # ============================== [필수 구현 끝] ==============================
 
-    def update_get(
-        self,
-        dice_a: List[int],
-        dice_b: List[int],
-        my_bid: Bid,
-        opp_bid: Bid,
-        my_group: str,
-    ):
-        """입찰 결과를 받아서 상태 업데이트"""
-        # 상대방의 입찰 기록 저장
+    def update_get(self, dice_a: List[int], dice_b: List[int], my_bid: Bid, opp_bid: Bid, my_group: str):
         self.opp_bid_history.append(opp_bid.amount)
 
-        # 그룹에 따라 주사위 분배
         if my_group == "A":
             self.my_state.add_dice(dice_a)
             self.opp_state.add_dice(dice_b)
@@ -202,7 +214,6 @@ class Game:
             self.my_state.add_dice(dice_b)
             self.opp_state.add_dice(dice_a)
 
-        # 입찰 결과에 따른 점수 반영
         my_bid_ok = my_bid.group == my_group
         self.my_state.bid(my_bid_ok, my_bid.amount)
 
@@ -211,128 +222,77 @@ class Game:
         self.opp_state.bid(opp_bid_ok, opp_bid.amount)
 
     def update_put(self, put: DicePut):
-        """내가 주사위를 배치한 결과 반영"""
         self.my_state.use_dice(put)
 
     def update_set(self, put: DicePut):
-        """상대가 주사위를 배치한 결과 반영"""
         self.opp_state.use_dice(put)
-
 
 # 팀의 현재 상태를 관리하는 클래스
 class GameState:
     def __init__(self):
-        self.dice = []  # 현재 보유한 주사위 목록
-        self.rule_score: List[Optional[int]] = [
-            None
-        ] * 12  # 각 규칙별 획득 점수 (사용하지 않았다면 None)
-        self.bid_score = 0  # 입찰로 얻거나 잃은 총 점수
+        self.dice = []
+        self.rule_score: List[Optional[int]] = [None] * 12
+        self.bid_score = 0
 
     def get_total_score(self) -> int:
-        """현재까지 획득한 총 점수 계산 (상단/하단 점수 + 보너스 + 입찰 점수)"""
-        basic = bonus = combination = 0
-
-        # 기본 점수 규칙 계산 (ONE ~ SIX)
         basic = sum(score for score in self.rule_score[0:6] if score is not None)
         bonus = 35000 if basic >= 63000 else 0
         combination = sum(score for score in self.rule_score[6:12] if score is not None)
-
         return basic + bonus + combination + self.bid_score
 
+    def get_available_rules(self) -> List[DiceRule]:
+        return [DiceRule(i) for i, score in enumerate(self.rule_score) if score is None]
+
     def bid(self, is_successful: bool, amount: int):
-        """입찰 결과에 따른 점수 반영"""
         if is_successful:
-            self.bid_score -= amount  # 성공시 베팅 금액만큼 점수 차감
+            self.bid_score -= amount
         else:
-            self.bid_score += amount  # 실패시 베팅 금액만큼 점수 획득
+            self.bid_score += amount
 
     def add_dice(self, new_dice: List[int]):
-        """새로운 주사위들을 보유 목록에 추가"""
         self.dice.extend(new_dice)
 
     def use_dice(self, put: DicePut):
-        """주사위를 사용하여 특정 규칙에 배치"""
-        # 이미 사용한 규칙인지 확인
-        assert (
-            put.rule is not None and self.rule_score[put.rule.value] is None
-        ), "Rule already used"
-
+        assert put.rule is not None and self.rule_score[put.rule.value] is None, f"Rule {put.rule.name} already used"
         for d in put.dice:
-            # 주사위 목록에 있는 주사위 제거
             if d in self.dice:
                 self.dice.remove(d)
-
-        # 해당 규칙의 점수 계산 및 저장
         assert put.rule is not None
         self.rule_score[put.rule.value] = self.calculate_score(put)
 
     @staticmethod
     def calculate_score(put: DicePut) -> int:
-        """규칙에 따른 점수를 계산하는 함수"""
         rule, dice = put.rule, put.dice
-        
         if not dice:
             return 0
 
-        # 기본 규칙 점수 계산 (해당 숫자에 적힌 수의 합 × 1000점)
-        if rule == DiceRule.ONE:
-            return sum(d for d in dice if d == 1) * 1000
-        if rule == DiceRule.TWO:
-            return sum(d for d in dice if d == 2) * 1000
-        if rule == DiceRule.THREE:
-            return sum(d for d in dice if d == 3) * 1000
-        if rule == DiceRule.FOUR:
-            return sum(d for d in dice if d == 4) * 1000
-        if rule == DiceRule.FIVE:
-            return sum(d for d in dice if d == 5) * 1000
-        if rule == DiceRule.SIX:
-            return sum(d for d in dice if d == 6) * 1000
-        if rule == DiceRule.CHOICE:  # 주사위에 적힌 모든 수의 합 × 1000점
-            return sum(dice) * 1000
-        if (
-            rule == DiceRule.FOUR_OF_A_KIND
-        ):  # 같은 수가 적힌 주사위가 4개 있다면, 주사위에 적힌 모든 수의 합 × 1000점, 아니면 0
-            counts = Counter(dice)
-            ok = any(count >= 4 for count in counts.values())
-            return sum(dice) * 1000 if ok else 0
-        if (
-            rule == DiceRule.FULL_HOUSE
-        ):  # 3개의 주사위에 적힌 수가 서로 같고, 다른 2개의 주사위에 적힌 수도 서로 같으면 주사위에 적힌 모든 수의 합 × 1000점, 아닐 경우 0점
-            counts = Counter(dice).values()
-            # Yacht(5개 동일)도 Full House로 인정
-            ok = sorted(counts) == [2, 3] or 5 in counts
-            return sum(dice) * 1000 if ok else 0
-        if (
-            rule == DiceRule.SMALL_STRAIGHT
-        ):  # 4개의 주사위에 적힌 수가 1234, 2345, 3456중 하나로 연속되어 있을 때, 15000점, 아닐 경우 0점
-            unique_dice = sorted(list(set(dice)))
+        counts = Counter(dice)
+        if rule == DiceRule.ONE: return counts.get(1, 0) * 1000
+        if rule == DiceRule.TWO: return counts.get(2, 0) * 2000
+        if rule == DiceRule.THREE: return counts.get(3, 0) * 3000
+        if rule == DiceRule.FOUR: return counts.get(4, 0) * 4000
+        if rule == DiceRule.FIVE: return counts.get(5, 0) * 5000
+        if rule == DiceRule.SIX: return counts.get(6, 0) * 6000
+        if rule == DiceRule.CHOICE: return sum(dice) * 1000
+        if rule == DiceRule.FOUR_OF_A_KIND:
+            return sum(dice) * 1000 if any(c >= 4 for c in counts.values()) else 0
+        if rule == DiceRule.FULL_HOUSE:
+            return sum(dice) * 1000 if sorted(counts.values()) in ([2, 3], [5]) else 0
+        if rule == DiceRule.SMALL_STRAIGHT:
+            unique_dice = set(dice)
             straights = [{1, 2, 3, 4}, {2, 3, 4, 5}, {3, 4, 5, 6}]
-            ok = any(s.issubset(set(unique_dice)) for s in straights)
-            return 15000 if ok else 0
-        if (
-            rule == DiceRule.LARGE_STRAIGHT
-        ):  # 5개의 주사위에 적힌 수가 12345, 23456중 하나로 연속되어 있을 때, 30000점, 아닐 경우 0점
-            unique_dice_set = set(dice)
-            ok = (
-                unique_dice_set == {1, 2, 3, 4, 5}
-                or unique_dice_set == {2, 3, 4, 5, 6}
-            )
-            return 30000 if ok else 0
-        if (
-            rule == DiceRule.YACHT
-        ):  # 5개의 주사위에 적힌 수가 모두 같을 때 50000점, 아닐 경우 0점
-            ok = len(set(dice)) == 1 and len(dice) == 5
-            return 50000 if ok else 0
+            return 15000 if any(s.issubset(unique_dice) for s in straights) else 0
+        if rule == DiceRule.LARGE_STRAIGHT:
+            unique_dice = set(dice)
+            return 30000 if unique_dice in [{1, 2, 3, 4, 5}, {2, 3, 4, 5, 6}] else 0
+        if rule == DiceRule.YACHT:
+            return 50000 if 5 in counts.values() else 0
 
         assert False, "Invalid rule"
 
-
 def main():
     game = Game()
-
-    # 입찰 라운드에서 나온 주사위들
     dice_a, dice_b = [0] * 5, [0] * 5
-    # 내가 마지막으로 한 입찰 정보
     my_bid = Bid("", 0)
 
     while True:
@@ -344,23 +304,18 @@ def main():
             command, *args = line.split()
 
             if command == "READY":
-                # 게임 시작
                 print("OK")
                 continue
 
             if command == "ROLL":
-                # 주사위 굴리기 결과 받기
                 str_a, str_b = args
-                for i, c in enumerate(str_a):
-                    dice_a[i] = int(c)  # 문자를 숫자로 변환
-                for i, c in enumerate(str_b):
-                    dice_b[i] = int(c)  # 문자를 숫자로 변환
+                dice_a = [int(c) for c in str_a]
+                dice_b = [int(c) for c in str_b]
                 my_bid = game.calculate_bid(dice_a, dice_b)
                 print(f"BID {my_bid.group} {my_bid.amount}")
                 continue
 
             if command == "GET":
-                # 주사위 받기
                 get_group, opp_group, opp_score = args
                 opp_score = int(opp_score)
                 game.update_get(
@@ -369,25 +324,22 @@ def main():
                 continue
 
             if command == "SCORE":
-                # 주사위 골라서 배치하기
                 put = game.calculate_put()
+                assert put is not None, "calculate_put returned None"
                 game.update_put(put)
                 assert put.rule is not None
                 print(f"PUT {put.rule.name} {''.join(map(str, sorted(put.dice)))}")
                 continue
 
             if command == "SET":
-                # 상대의 주사위 배치
                 rule, str_dice = args
                 dice = [int(c) for c in str_dice]
                 game.update_set(DicePut(DiceRule[rule], dice))
                 continue
 
             if command == "FINISH":
-                # 게임 종료
                 break
 
-            # 알 수 없는 명령어 처리
             print(f"Invalid command: {command}", file=sys.stderr)
             sys.exit(1)
 
@@ -397,3 +349,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
