@@ -1,10 +1,9 @@
 import sys
 import copy
+import math
 
 class Game:
-    """
-    [전략 수정] 위치 플레이를 대폭 강화하고, 영토 침략에 대한 강력한 페널티 시스템을 도입한 AI.
-    """
+
     def __init__(self, board, first):
         self.board = board
         self.first = first
@@ -22,26 +21,13 @@ class Game:
     def _rebuild_prefix_sum(self):
         for r in range(self.rows):
             for c in range(self.cols):
-                self.prefix_sum[r+1][c+1] = (
-                    self.prefix_sum[r][c+1] +
-                    self.prefix_sum[r+1][c] -
-                    self.prefix_sum[r][c] +
-                    self.board[r][c]
-                )
+                self.prefix_sum[r+1][c+1] = self.prefix_sum[r][c+1] + self.prefix_sum[r+1][c] - self.prefix_sum[r][c] + self.board[r][c]
 
     def isValid(self, r1, c1, r2, c2):
-        if not (0 <= r1 < self.rows and 0 <= c1 < self.cols and \
-                r1 <= r2 < self.rows and c1 <= c2 < self.cols):
+        if not (0 <= r1 < self.rows and 0 <= c1 < self.cols and r1 <= r2 < self.rows and c1 <= c2 < self.cols):
             return False
-
-        sums = self.prefix_sum[r2 + 1][c2 + 1] \
-             - self.prefix_sum[r1][c2 + 1] \
-             - self.prefix_sum[r2 + 1][c1] \
-             + self.prefix_sum[r1][c1]
-
-        if sums != 10:
-            return False
-
+        sums = self.prefix_sum[r2 + 1][c2 + 1] - self.prefix_sum[r1][c2 + 1] - self.prefix_sum[r2 + 1][c1] + self.prefix_sum[r1][c1]
+        if sums != 10: return False
         r1fit = c1fit = r2fit = c2fit = False
         for r in range(r1, r2 + 1):
             for c in range(c1, c2 + 1):
@@ -50,48 +36,92 @@ class Game:
                     if r == r2: r2fit = True
                     if c == c1: c1fit = True
                     if c == c2: c2fit = True
-        
         return r1fit and r2fit and c1fit and c2fit
 
     def calculateMove(self, _myTime, _oppTime):
-        best_move_for_me = (-1, -1, -1, -1)
-        max_lookahead_score = -float('inf') 
+        """Minimax 탐색을 시작하여 최적의 수를 계산합니다."""
+        best_move = (-1, -1, -1, -1)
+        max_eval = -math.inf
+        alpha = -math.inf
+        beta = math.inf
+
+        # 탐색 깊이. 3은 (나의 수 -> 상대 수 -> 나의 수) 3단계 앞을 의미합니다.
+        # 시간 초과가 발생하면 2 또는 1로 줄여서 안정성을 확보할 수 있습니다.
+        SEARCH_DEPTH = 3
 
         my_possible_moves = self._find_all_valid_moves()
-
         if not my_possible_moves:
-            return (-1, -1, -1, -1)
+            return best_move
+            
+        # 유망한 수부터 탐색하기 위해 휴리스틱으로 정렬 (알파-베타 프루닝 효율 극대화)
+        sorted_moves = sorted(my_possible_moves, key=lambda m: self._get_heuristic_score(m, isMyMove=True), reverse=True)
 
-        for my_move in my_possible_moves:
-            # 1. 내 수를 시뮬레이션하기 위한 가상 게임 생성
-            virtual_game_after_my_move = copy.deepcopy(self)
-            virtual_game_after_my_move.updateMove(*my_move, isMyMove=True)
+        for move in sorted_moves:
+            virtual_game = copy.deepcopy(self)
+            virtual_game.updateMove(*move, isMyMove=True)
             
-            # 2. 상대방의 최선 반격 예측
-            opponent_best_reply = virtual_game_after_my_move._find_best_opponent_move()
+            # 다음은 상대방 턴(Minimizing Player)이므로 is_maximizing_player=False로 호출
+            evaluation = self._minimax(virtual_game, SEARCH_DEPTH - 1, alpha, beta, False)
             
-            # 3. 상대방 반격까지 완료된 최종 가상 게임 생성
-            final_virtual_game = copy.deepcopy(virtual_game_after_my_move)
-            if opponent_best_reply != (-1, -1, -1, -1):
-                final_virtual_game.updateMove(*opponent_best_reply, isMyMove=False)
+            if evaluation > max_eval:
+                max_eval = evaluation
+                best_move = move
             
-            # --- 평가 시작 ---
-            # 3-1. 기본 유불리 점수 (내 최종영역 - 상대 최종영역)
-            current_lookahead_score = final_virtual_game._evaluate_board_state()
-            
-            # 3-2. [전략 수정] 강화된 위치 보너스
-            positional_bonus = self._get_positional_bonus(my_move)
-            current_lookahead_score += positional_bonus
-            
-            # 3-3. [전략 수정] 영토 침략 페널티 계산
-            invasion_penalty = self._calculate_invasion_penalty(virtual_game_after_my_move, opponent_best_reply)
-            current_lookahead_score += invasion_penalty
+            alpha = max(alpha, evaluation)
 
-            if current_lookahead_score > max_lookahead_score:
-                max_lookahead_score = current_lookahead_score
-                best_move_for_me = my_move
-                
-        return best_move_for_me
+        return best_move
+
+    def _minimax(self, game_state, depth, alpha, beta, is_maximizing_player):
+        """Minimax 알고리즘과 알파-베타 프루닝으로 최적의 수를 탐색합니다."""
+        if depth == 0 or not game_state._find_all_valid_moves():
+            return game_state._evaluate_board_state()
+
+        possible_moves = game_state._find_all_valid_moves()
+        sorted_moves = sorted(possible_moves, key=lambda m: game_state._get_heuristic_score(m, isMyMove=is_maximizing_player), reverse=is_maximizing_player)
+
+        if is_maximizing_player: # 나의 턴 (점수 극대화)
+            max_eval = -math.inf
+            for move in sorted_moves:
+                virtual_game = copy.deepcopy(game_state)
+                virtual_game.updateMove(*move, isMyMove=True)
+                evaluation = self._minimax(virtual_game, depth - 1, alpha, beta, False)
+                max_eval = max(max_eval, evaluation)
+                alpha = max(alpha, evaluation)
+                if beta <= alpha:
+                    break # Alpha Cutoff
+            return max_eval
+        else: # 상대방 턴 (점수 최소화)
+            min_eval = math.inf
+            for move in sorted_moves:
+                virtual_game = copy.deepcopy(game_state)
+                virtual_game.updateMove(*move, isMyMove=False)
+                evaluation = self._minimax(virtual_game, depth - 1, alpha, beta, True)
+                min_eval = min(min_eval, evaluation)
+                beta = min(beta, evaluation)
+                if beta <= alpha:
+                    break # Beta Cutoff
+            return min_eval
+
+    def _get_heuristic_score(self, move, isMyMove):
+        """알파-베타 프루닝의 효율을 높이기 위한 휴리스틱 평가 함수."""
+        return self.calculate_score_by_request(*move, isMyMove=isMyMove)
+    
+    def calculate_score_by_request(self, r1, c1, r2, c2, isMyMove):
+        score = 0
+        my_current_area = self.my_area if isMyMove else self.opp_area
+        opp_current_area = self.opp_area if isMyMove else self.my_area
+
+        for r in range(r1, r2 + 1):
+            for c in range(c1, c2 + 1):
+                if opp_current_area[r][c]:
+                    score += 1.5
+                elif not my_current_area[r][c]:
+                    is_edge = (r == 0 or r == self.rows - 1 or c == 0 or c == self.cols - 1)
+                    if is_edge:
+                        score += 2.2
+                    else:
+                        score += 0.75
+        return score
 
     def _find_all_valid_moves(self):
         moves = []
@@ -102,73 +132,12 @@ class Game:
                         if self.isValid(r, c, r2, c2):
                             moves.append((r, c, r2, c2))
         return moves
-
-    def _find_best_opponent_move(self):
-        best_move = (-1, -1, -1, -1)
-        max_score = -1
-        
-        possible_moves = self._find_all_valid_moves()
-        for move in possible_moves:
-            score = self.calculate_hybrid_score(*move, isMyMove=False)
-            if score > max_score:
-                max_score = score
-                best_move = move
-        return best_move
-
-    def calculate_hybrid_score(self, r1, c1, r2, c2, isMyMove):
-        stolen_cells = 0
-        claimed_cells = 0
-        
-        my_current_area = self.my_area if isMyMove else self.opp_area
-        opp_current_area = self.opp_area if isMyMove else self.my_area
-        
-        for r in range(r1, r2 + 1):
-            for c in range(c1, c2 + 1):
-                if opp_current_area[r][c]:
-                    stolen_cells += 1
-                elif not my_current_area[r][c]:
-                    claimed_cells += 1
-        
-        return (stolen_cells * 10) + claimed_cells
-
+    
     def _evaluate_board_state(self):
+        """탐색의 마지막 노드에서 보드의 최종 가치를 평가 (나의 영역 - 상대 영역)"""
         my_total_area = sum(row.count(True) for row in self.my_area)
         opp_total_area = sum(row.count(True) for row in self.opp_area)
         return my_total_area - opp_total_area
-
-    def _get_positional_bonus(self, move):
-        """[전략 수정] 영역 1~2칸의 가치에 해당하는 강력한 위치 보너스를 부여합니다."""
-        r1, c1, r2, c2 = move
-        rows, cols = self.rows, self.cols
-
-        is_top_left = (r1 == 0 and c1 == 0)
-        is_top_right = (r1 == 0 and c2 == cols - 1)
-        is_bottom_left = (r2 == rows - 1 and c1 == 0)
-        is_bottom_right = (r2 == rows - 1 and c2 == cols - 1)
-
-        if is_top_left or is_top_right or is_bottom_left or is_bottom_right:
-            return 2.0  # 꼭짓점 보너스 (영역 2칸 가치)
-        if r1 == 0 or r2 == rows - 1 or c1 == 0 or c2 == cols - 1:
-            return 1.0  # 가장자리 보너스 (영역 1칸 가치)
-        return 0.0
-
-    def _calculate_invasion_penalty(self, game_state_before_opp_move, opp_move):
-        """[전략 수정] 상대의 반격으로 내 영토가 침략당했다면 강력한 페널티를 부여합니다."""
-        if opp_move == (-1, -1, -1, -1):
-            return 0.0
-
-        r1, c1, r2, c2 = opp_move
-        stolen_from_me = 0
-        
-        # 상대방의 움직임(opp_move) 범위 내에서, 원래 내 땅이었던 칸의 수를 셉니다.
-        for r in range(r1, r2 + 1):
-            for c in range(c1, c2 + 1):
-                # 'game_state_before_opp_move'는 내 수는 반영됐지만 상대 수는 반영되기 전의 상태입니다.
-                if game_state_before_opp_move.my_area[r][c]:
-                    stolen_from_me += 1
-        
-        # 1칸 뺏길 때마다 -2점씩 부과하여, AI가 영토를 잃는 것을 극도로 꺼리게 만듭니다.
-        return stolen_from_me * -2.0
 
     def updateOpponentAction(self, action, _time):
         self.updateMove(*action, isMyMove=False)
@@ -177,19 +146,15 @@ class Game:
         if r1 == c1 == r2 == c2 == -1:
             self.passed = True
             return
-
         area_to_update = self.my_area if isMyMove else self.opp_area
         opp_area_to_clear = self.opp_area if isMyMove else self.my_area
-
         for r in range(r1, r2 + 1):
             for c in range(c1, c2 + 1):
                 self.board[r][c] = 0
                 area_to_update[r][c] = True
                 opp_area_to_clear[r][c] = False
-
         self._rebuild_prefix_sum()
         self.passed = False
-
 
 def main():
     game = None
@@ -210,7 +175,8 @@ def main():
             continue
 
         if command == "INIT":
-            board = [list(map(int, row)) for row in param]
+            # board = [list(map(int, list(row))) for row in board_data]
+            board = [list(map(int, list(row))) for row in param]
             game = Game(board, first)
             continue
 
@@ -228,7 +194,6 @@ def main():
 
         if command == "FINISH":
             break
-
 
 if __name__ == "__main__":
     main()
