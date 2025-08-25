@@ -44,6 +44,8 @@ class Game:
         self.round = 0
         self.opp_bid_history = []  # 상대방의 입찰 기록
         self.seen_dice_counts = Counter()  # 게임 전체에 등장한 주사위 숫자 카운트
+        self.contention_win_streak = 0
+        self.contention_loss_streak = 0
 
     # ================================ [필수 구현] ================================
     def _evaluate_potential(self, dice: List[int], state: 'GameState') -> Tuple[int, Optional[DiceRule]]:
@@ -68,49 +70,30 @@ class Game:
         self.seen_dice_counts.update(dice_a)
         self.seen_dice_counts.update(dice_b)
         
-        if self.round == 1:
-            my_potential_a, _ = self._evaluate_potential(dice_a, self.my_state)
-            my_potential_b, _ = self._evaluate_potential(dice_b, self.my_state)
-            group_to_bid = 'A' if my_potential_a >= my_potential_b else 'B'
-            return Bid(group_to_bid, 1)
-
+        my_potential_a, _ = self._evaluate_potential(dice_a, self.my_state)
+        my_potential_b, _ = self._evaluate_potential(dice_b, self.my_state)
+        group_to_bid = 'A' if my_potential_a >= my_potential_b else 'B'
+        
+        # 상대방의 평균 베팅액을 미리 계산
         non_zero_bids = [b for b in self.opp_bid_history if b > 0]
+        # 상대 베팅 기록이 없으면 기본값 100 사용
         avg_opp_bid = (sum(non_zero_bids) / len(non_zero_bids)) if non_zero_bids else 100
 
-        base_bid = max(1, int(avg_opp_bid))
-        
-        my_potential_a, my_rule_a = self._evaluate_potential(dice_a, self.my_state)
-        my_potential_b, my_rule_b = self._evaluate_potential(dice_b, self.my_state)
+        # 1. 경합 2연패 이상 시: 공격적 베팅
+        if self.contention_loss_streak >= 2:
+            multiplier = 1.0 + (self.contention_loss_streak * 0.2)
+            amount = int(avg_opp_bid * multiplier)
+            return Bid(group_to_bid, max(1, amount))
 
-        # 후반 라운드 전략 (9라운드 이상)
-        if self.round >= 9:
-            MUST_WIN_RULES = {DiceRule.YACHT, DiceRule.LARGE_STRAIGHT, DiceRule.FULL_HOUSE, DiceRule.FOUR_OF_A_KIND, DiceRule.SMALL_STRAIGHT}
-            a_is_must_win = my_rule_a in MUST_WIN_RULES and self.my_state.rule_score[my_rule_a.value] is None
-            b_is_must_win = my_rule_b in MUST_WIN_RULES and self.my_state.rule_score[my_rule_b.value] is None
+        # 2. 경합 2연승 이상 시: 방어적 베팅
+        elif self.contention_win_streak >= 2:
+            return Bid(group_to_bid, 1)
 
-            if a_is_must_win or b_is_must_win:
-                cautious_bid = max(1, int(avg_opp_bid * 0.1))
-                group_to_bid = 'A' if my_potential_a >= my_potential_b else 'B'
-                return Bid(group_to_bid, cautious_bid)
-            else:
-                group_to_bid = 'A' if my_potential_a >= my_potential_b else 'B'
-                return Bid(group_to_bid, base_bid)
-        
-        # 초중반 라운드 전략 (2-8 라운드)
+        # 3. 그 외 모든 경우 (기본 베팅)
         else:
-            critical_bid = max(1, int(avg_opp_bid * 1.2))
-            PRIORITY_RULES = {DiceRule.YACHT, DiceRule.LARGE_STRAIGHT, DiceRule.SMALL_STRAIGHT}
-            my_a_is_prio = my_rule_a in PRIORITY_RULES and self.my_state.rule_score[my_rule_a.value] is None
-            my_b_is_prio = my_rule_b in PRIORITY_RULES and self.my_state.rule_score[my_rule_b.value] is None
-
-            if my_a_is_prio or my_b_is_prio:
-                if my_a_is_prio and not my_b_is_prio: return Bid('A', critical_bid)
-                if not my_a_is_prio and my_b_is_prio: return Bid('B', critical_bid)
-                group = 'A' if my_potential_a >= my_potential_b else 'B'
-                return Bid(group, critical_bid)
-            else:
-                group = 'A' if my_potential_a >= my_potential_b else 'B'
-                return Bid(group, base_bid)
+            # 기본 베팅액을 상대의 평균 베팅액으로 설정
+            amount = int(avg_opp_bid)
+            return Bid(group_to_bid, max(1, amount))
 
     def calculate_put(self) -> DicePut:
         my_hand = self.my_state.dice
@@ -163,11 +146,9 @@ class Game:
                 for combo in dice_combos:
                     dice_list = list(combo)
                     
-                    # === '6 저축' 전략 적용 ===
-                    # SIX 규칙이 아직 비어있다면, 특정 조합에 6을 사용하지 못하게 막는다.
                     if six_rule_is_available:
                         if (rule == DiceRule.LARGE_STRAIGHT or rule == DiceRule.FULL_HOUSE) and 6 in dice_list:
-                            continue  # 이 조합은 건너뛰기
+                            continue
 
                     score = GameState.calculate_score(DicePut(rule, dice_list))
                     if score > best_score_for_rule:
@@ -182,7 +163,6 @@ class Game:
         for rule in available_rules:
             for combo in dice_combos:
                 dice_list = list(combo)
-                # '6 저축' 전략을 여기서도 한 번 더 확인
                 if six_rule_is_available:
                     if (rule == DiceRule.LARGE_STRAIGHT or rule == DiceRule.FULL_HOUSE) and 6 in dice_list:
                         continue
@@ -196,16 +176,29 @@ class Game:
             return best_fallback_put
 
         low_value_rules = [DiceRule.ONE, DiceRule.TWO, DiceRule.CHOICE]
-        for rule in low_value_rules:
-            if rule in available_rules:
-                return DicePut(rule, list(dice_combos[0]))
-        
-        return DicePut(available_rules[0], list(dice_combos[0]))
+        if dice_combos:
+            for rule in low_value_rules:
+                if rule in available_rules:
+                    return DicePut(rule, list(dice_combos[0]))
+            return DicePut(available_rules[0], list(dice_combos[0]))
+        else:
+             return DicePut(available_rules[0], [])
+
 
     # ============================== [필수 구현 끝] ==============================
 
     def update_get(self, dice_a: List[int], dice_b: List[int], my_bid: Bid, opp_bid: Bid, my_group: str):
         self.opp_bid_history.append(opp_bid.amount)
+        
+        is_contention = my_bid.group == opp_bid.group
+        if is_contention:
+            i_won = my_bid.group == my_group
+            if i_won:
+                self.contention_win_streak += 1
+                self.contention_loss_streak = 0
+            else:
+                self.contention_loss_streak += 1
+                self.contention_win_streak = 0
 
         if my_group == "A":
             self.my_state.add_dice(dice_a)
@@ -227,7 +220,6 @@ class Game:
     def update_set(self, put: DicePut):
         self.opp_state.use_dice(put)
 
-# 팀의 현재 상태를 관리하는 클래스
 class GameState:
     def __init__(self):
         self.dice = []
@@ -318,8 +310,9 @@ def main():
             if command == "GET":
                 get_group, opp_group, opp_score = args
                 opp_score = int(opp_score)
+                opp_bid = Bid(opp_group, opp_score)
                 game.update_get(
-                    dice_a, dice_b, my_bid, Bid(opp_group, opp_score), get_group
+                    dice_a, dice_b, my_bid, opp_bid, get_group
                 )
                 continue
 
@@ -328,7 +321,8 @@ def main():
                 assert put is not None, "calculate_put returned None"
                 game.update_put(put)
                 assert put.rule is not None
-                print(f"PUT {put.rule.name} {''.join(map(str, sorted(put.dice)))}")
+                dice_str = ''.join(map(str, sorted(put.dice))) if put.dice else ''
+                print(f"PUT {put.rule.name} {dice_str}")
                 continue
 
             if command == "SET":
@@ -349,4 +343,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
